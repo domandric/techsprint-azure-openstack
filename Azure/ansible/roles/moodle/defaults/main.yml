@@ -1,0 +1,17 @@
+---
+moodle_version: '5.2.2'
+moodle_sha256: '72be209e7c0f5341b87de0bc993b2430087fda2769d8c3cc2f32736d1513e88c'
+moodle_url: 'https://packaging.moodle.org/stable502/moodle-{{ moodle_version }}.tgz'
+moodle_root: /var/www/moodle
+moodle_local_mount: /srv/moodle-local
+moodle_shared_mount: '{{ azure_files_mount }}'
+moodle_objects_mount: '{{ azure_blob_mount }}'
+mysql_ca_bundle_path: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+moodle_db_prefix: mdl_
+
+moodle_admin_lang: en
+moodle_site_fullname: '{{ tenant_slug }} Moodle'
+moodle_site_shortname: '{{ tenant_slug }}'
+
+moodle_shared_marker_gate_retries: 30
+moodle_shared_marker_gate_delay: 10

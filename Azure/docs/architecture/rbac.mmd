@@ -1,0 +1,18 @@
+flowchart LR
+    LeadGroup["grp-ts-devops-leads"] --> Reader["Reader\nper developer RG (assigned by each tenant apply)"]
+    LeadGroup --> LeadPower["TechSprint VM Power Operator\nsubscription custom role"]
+    LeadGroup --> LeadSSH["SSH path through private lead/jump topology"]
+
+    DevAGroup["grp-ts-dev-<developer-a>"] --> DevAReader["Reader\nown developer RG"]
+    DevAGroup --> DevAPower["TechSprint VM Power Operator\nown app VMs only"]
+    DevNGroup["grp-ts-dev-<developer-n>"] --> DevNReader["Reader\nown developer RG"]
+    DevNGroup --> DevNPower["TechSprint VM Power Operator\nown app VMs only"]
+
+    UAMI["One UAMI per developer"] --> BlobRole["Storage Blob Data Contributor\nown Blob account"]
+    FilesNfs["Azure Files Premium NFSv4.1\nprivate endpoint + AUTH_SYS"] -. separate network path .-> NfsMount["Native NFS mount\nno SMB/CIFS/Kerberos path"]
+    UAMI -. no credential fallback .-> NoKeys["No storage key, SAS, or public endpoint fallback"]
+
+    LeadPower --> SharedRG["shared RG: Jump/lead/app infrastructure"]
+    LeadPower --> DevRGs["all developer RG app VMs"]
+    DevAPower --> DevARG["developer A RG"]
+    DevNPower --> DevNRG["developer N RG"]

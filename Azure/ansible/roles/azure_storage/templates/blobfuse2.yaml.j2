@@ -1,0 +1,16 @@
+logging:
+  type: syslog
+components:
+  - libfuse
+  - file_cache
+  - azstorage
+file_cache:
+  path: /srv/moodle-local/blobfuse-cache
+libfuse:
+  allow-other: true
+azstorage:
+  type: block
+  account-name: '{{ blob_endpoint.split('.')[0] }}'
+  container: '{{ blob_container_name }}'
+  mode: msi
+  msi-client-id: '{{ uami_client_id }}'

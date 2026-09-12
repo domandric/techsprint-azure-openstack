@@ -1,0 +1,279 @@
+---
+- name: Require pinned Moodle checksum and topology input
+  ansible.builtin.assert:
+    that:
+      - moodle_sha256 | length == 64
+      - moodle_hostname is defined
+      - mysql_fqdn is defined
+      - azure_deployment_id is defined
+    fail_msg: Moodle version and SHA256 plus non-secret database topology are required.
+
+- name: Require Moodle mount paths to remain a single source of truth with the azure_storage role
+  ansible.builtin.assert:
+    that:
+      - moodle_shared_mount == azure_files_mount
+      - moodle_objects_mount == azure_blob_mount
+    fail_msg: >-
+      moodle_shared_mount/moodle_objects_mount must match
+      azure_files_mount/azure_blob_mount exactly; these are the same
+      NFS/Blob mounts the azure_storage role provisions, and must never
+      diverge from what this role writes to.
+
+- name: Require every Moodle secret key used by config.php, readyz, database-user creation and admin bootstrap
+  ansible.builtin.assert:
+    that:
+      - moodle_secrets is defined
+      - tenant_slug in moodle_secrets
+      - moodle_secrets[tenant_slug].db_name is defined
+      - moodle_secrets[tenant_slug].db_name | length > 0
+      - moodle_secrets[tenant_slug].db_user is defined
+      - moodle_secrets[tenant_slug].db_user | length > 0
+      - moodle_secrets[tenant_slug].db_password is defined
+      - moodle_secrets[tenant_slug].db_password | length > 0
+      - moodle_secrets[tenant_slug].mysql_admin_user is defined
+      - moodle_secrets[tenant_slug].mysql_admin_user | length > 0
+      - moodle_secrets[tenant_slug].mysql_admin_password is defined
+      - moodle_secrets[tenant_slug].mysql_admin_password | length > 0
+      - moodle_secrets[tenant_slug].admin_user is defined
+      - moodle_secrets[tenant_slug].admin_user | length > 0
+      - moodle_secrets[tenant_slug].admin_password is defined
+      - moodle_secrets[tenant_slug].admin_password | length >= 8
+      - moodle_secrets[tenant_slug].admin_email is defined
+      - moodle_secrets[tenant_slug].admin_email is match('^[^@\s]+@[^@\s]+\.[^@\s]+$')
+    fail_msg: >-
+      moodle_secrets[tenant_slug] must supply all eight keys this role uses:
+      db_name, db_user, db_password, mysql_admin_user, mysql_admin_password
+      (config.php/readyz/database-user creation), and admin_user,
+      admin_password (8+ characters), admin_email (admin bootstrap). Load these
+      from the generated, gitignored, Ansible-Vault-encrypted inventory file
+      (see ansible/vault.example.yml); never commit real values.
+  no_log: true
+
+- name: Enable the Rocky Linux EPEL repository for Moodle dependencies
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+
+- name: Install Nginx PHP 8.3 and Moodle dependencies on Rocky
+  ansible.builtin.dnf:
+    name: [nginx, php-cli, php-fpm, php-mysqlnd, php-xml, php-gd, php-intl, php-mbstring, php-opcache, php-soap, php-sodium, php-zip, php-curl, tar]
+    state: present
+
+- name: Configure PHP requirements for Moodle
+  ansible.builtin.copy:
+    dest: /etc/php.d/99-moodle.ini
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      max_input_vars = 5000
+  notify: Restart PHP FPM
+
+- name: Download pinned Moodle archive
+  ansible.builtin.get_url:
+    url: '{{ moodle_url }}'
+    dest: /var/cache/moodle-{{ moodle_version }}.tgz
+    checksum: 'sha256:{{ moodle_sha256 }}'
+    mode: '0644'
+
+- name: Unpack Moodle atomically
+  ansible.builtin.unarchive:
+    src: /var/cache/moodle-{{ moodle_version }}.tgz
+    dest: /var/www
+    remote_src: true
+    creates: '{{ moodle_root }}/public/version.php'
+
+- name: Create Moodle runtime configuration
+  ansible.builtin.template:
+    src: config.php.j2
+    dest: '{{ moodle_root }}/config.php'
+    owner: root
+    group: nginx
+    mode: '0640'
+  no_log: true
+  notify: Restart PHP FPM
+
+- name: Install dependency-aware Moodle readiness endpoint
+  ansible.builtin.template:
+    src: readyz.php.j2
+    dest: '{{ moodle_root }}/readyz.php'
+    owner: root
+    group: nginx
+    mode: '0640'
+  no_log: true
+  notify: Restart PHP FPM
+
+- name: Install MySQL client libraries for idempotent Moodle bootstrap
+  ansible.builtin.dnf:
+    name: [mariadb, python3-PyMySQL]
+    state: present
+
+- name: Create Moodle database user through TLS on app01
+  community.mysql.mysql_user:
+    login_host: '{{ mysql_fqdn }}'
+    login_user: '{{ moodle_secrets[tenant_slug].mysql_admin_user }}'
+    login_password: '{{ moodle_secrets[tenant_slug].mysql_admin_password }}'
+    ca_cert: '{{ mysql_ca_bundle_path }}'
+    check_hostname: true
+    name: '{{ moodle_secrets[tenant_slug].db_user }}'
+    password: '{{ moodle_secrets[tenant_slug].db_password }}'
+    priv: '{{ moodle_secrets[tenant_slug].db_name }}.*:ALL'
+    host: '{{ item }}'
+    state: present
+  loop: '{{ mysql_allowed_client_ips }}'
+  when: app_role | default('') == 'app01'
+  no_log: true
+
+- name: Configure PHP-FPM pool as nginx
+  ansible.builtin.copy:
+    dest: /etc/php-fpm.d/www.conf
+    content: |
+      [www]
+      user = nginx
+      group = nginx
+      listen = /run/php-fpm/www.sock
+      listen.owner = nginx
+      listen.group = nginx
+      pm = dynamic
+      pm.max_children = 20
+      pm.start_servers = 2
+      pm.min_spare_servers = 1
+      pm.max_spare_servers = 5
+    mode: '0644'
+  notify: Restart PHP FPM
+
+- name: Configure Nginx Moodle virtual host
+  ansible.builtin.template:
+    src: moodle.conf.j2
+    dest: /etc/nginx/conf.d/moodle.conf
+    mode: '0644'
+  notify: Restart Nginx
+
+- name: Permit Nginx network and NFS access under SELinux
+  ansible.posix.seboolean:
+    name: '{{ item }}'
+    state: true
+    persistent: true
+  loop: [httpd_can_network_connect_db, httpd_can_network_connect, httpd_use_nfs, httpd_use_fusefs]
+
+- name: Check whether the Moodle installation marker already exists on app01
+  ansible.builtin.stat:
+    path: '{{ moodle_shared_mount }}/moodledata/.moodle-installed'
+  register: moodle_installed_marker
+  when: app_role | default('') == 'app01'
+
+- name: Check whether any Moodle database schema already exists on app01 when the marker is missing
+  community.mysql.mysql_query:
+    login_host: '{{ mysql_fqdn }}'
+    login_user: '{{ moodle_secrets[tenant_slug].mysql_admin_user }}'
+    login_password: '{{ moodle_secrets[tenant_slug].mysql_admin_password }}'
+    ca_cert: '{{ mysql_ca_bundle_path }}'
+    check_hostname: true
+    login_db: '{{ moodle_secrets[tenant_slug].db_name }}'
+    query: "SHOW TABLES LIKE '{{ moodle_db_prefix }}config'"
+  register: moodle_schema_probe
+  changed_when: false
+  no_log: true
+  when:
+    - app_role | default('') == 'app01'
+    - not moodle_installed_marker.stat.exists
+
+- name: Refuse to infer installation completion from an unmarked database schema
+  ansible.builtin.fail:
+    msg: >-
+      Moodle database tables exist but the authoritative shared installation
+      marker is missing. Refusing to infer that a potentially partial schema is
+      complete. Restore the marker only after independently verifying the
+      installation, or reset the incomplete database before rerunning.
+  when:
+    - app_role | default('') == 'app01'
+    - not moodle_installed_marker.stat.exists
+    - (moodle_schema_probe.query_result | default([]) | flatten | length) > 0
+
+- name: Run Moodle CLI database installation only on app01 when neither the marker nor the schema exist
+  ansible.builtin.command:
+    argv:
+      - php
+      - '{{ moodle_root }}/admin/cli/install_database.php'
+      - '--agree-license'
+      - '--lang={{ moodle_admin_lang }}'
+      - '--adminuser={{ moodle_secrets[tenant_slug].admin_user }}'
+      - '--adminpass={{ moodle_secrets[tenant_slug].admin_password }}'
+      - '--adminemail={{ moodle_secrets[tenant_slug].admin_email }}'
+      - '--fullname={{ moodle_site_fullname }}'
+      - '--shortname={{ moodle_site_shortname }}'
+    creates: '{{ moodle_shared_mount }}/moodledata/.moodle-installed'
+  register: moodle_install_result
+  when:
+    - app_role | default('') == 'app01'
+    - not moodle_installed_marker.stat.exists
+    - (moodle_schema_probe.query_result | default([]) | flatten | length) == 0
+  no_log: true
+
+- name: Mark a successful Moodle CLI installation complete on app01
+  ansible.builtin.copy:
+    dest: '{{ moodle_shared_mount }}/moodledata/.moodle-installed'
+    content: |
+      installed by the Azure Ansible moodle role
+    owner: nginx
+    group: nginx
+    mode: '0640'
+  when:
+    - app_role | default('') == 'app01'
+    - not moodle_installed_marker.stat.exists
+    - moodle_install_result is changed
+
+- name: Create Moodle cron service only on app01
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/azure-moodle-cron.service
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Azure Moodle cron
+      After=network-online.target
+
+      [Service]
+      Type=oneshot
+      User=nginx
+      Group=nginx
+      ExecStart=/usr/bin/php {{ moodle_root }}/admin/cli/cron.php
+  when: app_role | default('') == 'app01'
+  notify: Reload systemd
+
+- name: Create Moodle cron timer only on app01
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/azure-moodle-cron.timer
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Run Azure Moodle cron every minute
+
+      [Timer]
+      OnCalendar=*:*:00
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+  when: app_role | default('') == 'app01'
+  notify: Reload systemd
+
+- name: Enable and start Moodle cron timer only on app01
+  ansible.builtin.systemd:
+    name: azure-moodle-cron.timer
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: app_role | default('') == 'app01'
+
+- name: Gate non-primary app hosts on the shared Moodle installation marker before services are enabled
+  ansible.builtin.include_tasks: gate_on_shared_marker.yml
+
+- name: Apply Moodle service configuration before health checks
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Moodle web services
+  ansible.builtin.systemd:
+    name: '{{ item }}'
+    enabled: true
+    state: started
+  loop: [php-fpm, nginx]

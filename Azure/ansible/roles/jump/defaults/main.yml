@@ -1,0 +1,5 @@
+---
+jump_spoke_cidr: 10.20.0.0/16
+jump_public_interface: eth0
+jump_app_gateway_ip: 10.10.2.10
+jump_app_gateway_port: 8080

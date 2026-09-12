@@ -1,0 +1,10 @@
+{% for tunnel_user in jump_tunnel_users %}
+Match User {{ tunnel_user.name }}
+  AllowTcpForwarding local
+  PermitTTY no
+  X11Forwarding no
+  AllowAgentForwarding no
+  ForceCommand /usr/local/libexec/azure-tunnel {{ tunnel_user.name }}
+  PermitOpen {{ app_gateway_private_ip }}:{{ app_gateway_port }} {{ tunnel_user.app_private_ips | join(':22 ') }}:22
+{% endfor %}
+Match all

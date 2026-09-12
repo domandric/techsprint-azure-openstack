@@ -1,0 +1,13 @@
+[Unit]
+Description=Azure Files Moodle dataroot (private NFSv4.1)
+After=network-online.target
+Wants=network-online.target
+
+[Mount]
+What={{ files_endpoint }}:/{{ files_endpoint.split('.')[0] }}/{{ files_share_name }}
+Where={{ azure_files_mount }}
+Type=nfs
+Options={{ azure_files_nfs_options }}
+
+[Install]
+WantedBy=multi-user.target

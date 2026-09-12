@@ -1,0 +1,7 @@
+---
+azure_admin_group: wheel
+azure_required_packages:
+  - python3
+  - policycoreutils-python-utils
+  - firewalld
+  - chrony

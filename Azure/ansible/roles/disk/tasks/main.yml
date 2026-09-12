@@ -1,0 +1,99 @@
+---
+- name: Inspect stable Azure data-disk paths
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop: '{{ moodle_data_device_candidates }}'
+  register: moodle_disk_paths
+
+- name: Select stable Azure data-disk path
+  ansible.builtin.set_fact:
+    moodle_data_device: '{{ moodle_disk_paths.results | selectattr("stat.exists") | map(attribute="item") | first | default("") }}'
+
+- name: Fail when expected managed data disk is absent
+  ansible.builtin.assert:
+    that: moodle_data_device | length > 0
+    fail_msg: Expected 32 GiB managed disk LUN 0 is missing.
+
+- name: Create XFS filesystem on Moodle data disk
+  community.general.filesystem:
+    dev: '{{ moodle_data_device }}'
+    fstype: xfs
+
+- name: Resolve immutable UUID for Moodle data disk
+  ansible.builtin.command:
+    argv: [blkid, -s, UUID, -o, value, '{{ moodle_data_device }}']
+  register: moodle_disk_uuid
+  changed_when: false
+
+- name: Require a UUID after formatting Moodle data disk
+  ansible.builtin.assert:
+    that: moodle_disk_uuid.stdout | trim | length > 0
+    fail_msg: Moodle data disk has no filesystem UUID after XFS formatting.
+
+- name: Mount Moodle local disk by UUID
+  ansible.posix.mount:
+    path: '{{ moodle_local_mount }}'
+    src: 'UUID={{ moodle_disk_uuid.stdout | trim }}'
+    fstype: xfs
+    opts: defaults,noatime
+    state: mounted
+
+- name: Persist the scoped SELinux context for the Moodle local data tree
+  community.general.sefcontext:
+    target: '{{ moodle_local_mount }}(/.*)?'
+    setype: httpd_sys_rw_content_t
+    state: present
+
+- name: Apply the Moodle local SELinux context to the mounted tree
+  ansible.builtin.command:
+    argv: [restorecon, -R, -v, '{{ moodle_local_mount }}']
+  register: moodle_local_restorecon
+  changed_when: (moodle_local_restorecon.stdout | default('') | trim | length) > 0
+  failed_when: moodle_local_restorecon.rc != 0
+
+- name: Check the persistent SELinux mapping for the Moodle local mount root
+  ansible.builtin.command:
+    argv: [matchpathcon, -n, '{{ moodle_local_mount }}']
+  register: moodle_local_matchpathcon
+  changed_when: false
+  failed_when: moodle_local_matchpathcon.rc != 0
+
+- name: Check the actual SELinux context of the Moodle local mount root
+  ansible.builtin.command:
+    argv: [stat, -c, '%C', '{{ moodle_local_mount }}']
+  register: moodle_local_mount_context
+  changed_when: false
+  failed_when: moodle_local_mount_context.rc != 0
+
+- name: Inspect the existing local readiness marker context when present
+  ansible.builtin.stat:
+    path: '{{ moodle_local_mount }}/{{ azure_mount_ready_marker | default(".techsprint-mount-ready") }}'
+  register: moodle_local_marker
+  changed_when: false
+
+- name: Check the existing local readiness marker SELinux context
+  ansible.builtin.command:
+    argv: [stat, -c, '%C', '{{ moodle_local_mount }}/{{ azure_mount_ready_marker | default(".techsprint-mount-ready") }}']
+  register: moodle_local_marker_context
+  changed_when: false
+  failed_when: moodle_local_marker_context.rc != 0
+  when: moodle_local_marker.stat.exists | default(false)
+
+- name: Require the persistent and actual Moodle local SELinux contexts
+  ansible.builtin.assert:
+    that:
+      - moodle_local_matchpathcon.stdout is search('httpd_sys_rw_content_t')
+      - moodle_local_mount_context.stdout is search('httpd_sys_rw_content_t')
+      - not (moodle_local_marker.stat.exists | default(false)) or ((moodle_local_marker_context.stdout | default('')) is search('httpd_sys_rw_content_t'))
+    fail_msg: >-
+      The mounted Moodle local tree is not labeled httpd_sys_rw_content_t in
+      both the persistent mapping and the actual mount-root/marker context.
+
+- name: Create local cache and log paths
+  ansible.builtin.file:
+    path: '{{ moodle_local_mount }}/{{ item }}'
+    state: directory
+    owner: nginx
+    group: nginx
+    mode: '0750'
+  loop: [localcache, logs, blobfuse-cache]

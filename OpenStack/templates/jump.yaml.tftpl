@@ -1,0 +1,56 @@
+#cloud-config
+ssh_pwauth: false
+disable_root: true
+users:
+  - name: ${jsonencode(developer_slug)}
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${jsonencode(public_key)}
+%{ for slug in sort(keys(developer_ssh_public_keys)) }
+  - name: ${jsonencode(slug)}
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${jsonencode(developer_ssh_public_keys[slug])}
+%{ endfor }
+write_files:
+  - path: /var/www/html/health.html
+    permissions: '0644'
+    content: |
+      healthy jump
+runcmd:
+  - |
+      set -euo pipefail
+      required_packages=(python3 curl vim-enhanced firewalld policycoreutils)
+      packages_installed=false
+      for attempt in $(seq 1 60); do
+        if timeout --signal=TERM --kill-after=10s 120s dnf install -y --setopt=timeout=15 --setopt=retries=2 "$${required_packages[@]}"; then
+          packages_installed=true
+          break
+        fi
+        sleep 5
+      done
+      [[ "$${packages_installed}" == true ]] || { printf 'Required jump packages did not install within the retry budget\n' >&2; exit 1; }
+      if grep -q '^SELINUX=' /etc/selinux/config; then sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config; else printf '\nSELINUX=enforcing\n' >> /etc/selinux/config; fi
+      setenforce 1
+      [[ "$(getenforce)" == Enforcing ]] || { printf 'SELinux is not enforcing\n' >&2; exit 1; }
+      configure_firewalld() (
+        set -euo pipefail
+        restore_selinux() {
+          setenforce 1
+        }
+        trap restore_selinux EXIT
+        systemctl enable --now firewalld
+        setenforce 0
+        timeout --signal=TERM --kill-after=5s 30s firewall-cmd --permanent --add-service=ssh
+        timeout --signal=TERM --kill-after=5s 30s firewall-cmd --reload
+        timeout --signal=TERM --kill-after=5s 30s systemctl restart firewalld
+        setenforce 1
+        trap - EXIT
+      )
+      configure_firewalld
+      [[ "$(getenforce)" == Enforcing ]] || { printf 'SELinux was not restored to enforcing after firewalld configuration\n' >&2; exit 1; }
+final_message: TECHSPRINT_JUMP_READY

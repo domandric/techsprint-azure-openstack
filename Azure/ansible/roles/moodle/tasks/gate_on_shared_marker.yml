@@ -1,0 +1,22 @@
+---
+- name: Gate non-primary app hosts on the shared Moodle installation marker before services are enabled
+  when: app_role | default('') != 'app01'
+  block:
+    - name: Poll for the authoritative shared Moodle installation marker written by app01
+      ansible.builtin.stat:
+        path: '{{ moodle_shared_mount }}/moodledata/.moodle-installed'
+      register: moodle_shared_marker_probe
+      until: moodle_shared_marker_probe.stat.exists
+      retries: '{{ moodle_shared_marker_gate_retries }}'
+      delay: '{{ moodle_shared_marker_gate_delay }}'
+  rescue:
+    - name: Fail clearly when app01 has not written the shared Moodle installation marker in time
+      ansible.builtin.fail:
+        msg: >-
+          Shared Moodle installation marker
+          ({{ moodle_shared_mount }}/moodledata/.moodle-installed) was not
+          detected within {{ (moodle_shared_marker_gate_retries | int) *
+          (moodle_shared_marker_gate_delay | int) }} seconds; app01 may
+          still be installing or has failed. Refusing to enable web
+          services on this non-primary app host before the shared marker
+          exists.

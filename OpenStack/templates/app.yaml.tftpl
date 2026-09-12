@@ -1,0 +1,200 @@
+#cloud-config
+ssh_pwauth: false
+disable_root: true
+users:
+  - name: ${developer_slug}
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${jsonencode(public_key)}
+      - ${jsonencode(lead_public_key)}
+write_files:
+  - path: /etc/yum.repos.d/mariadb.repo
+    permissions: '0644'
+    content: |
+      [mariadb]
+      name=MariaDB 10.11 for Rocky Linux 8 - $basearch
+      baseurl=https://rpm.mariadb.org/10.11/rhel/8/$basearch
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://rpm.mariadb.org/RPM-GPG-KEY-MariaDB
+      module_hotfixes=1
+  - path: /etc/httpd/conf.d/moodle.conf
+    permissions: '0644'
+    content: |
+      <VirtualHost *:80>
+        ServerName ${developer_slug}.${base_domain}
+        DocumentRoot /var/www/moodle/public
+        DirectoryIndex index.php index.html
+        <Directory /var/www/moodle/public>
+          Options FollowSymLinks
+          AllowOverride All
+          Require all granted
+        </Directory>
+        <FilesMatch \.php$>
+          SetHandler "proxy:unix:/run/php-fpm/www.sock|fcgi://localhost"
+        </FilesMatch>
+      </VirtualHost>
+  - path: /usr/local/sbin/techsprint-app-bootstrap
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      required_packages=(httpd php php-cli php-fpm php-mysqlnd php-gd php-xml php-mbstring php-intl php-opcache php-zip php-curl php-soap php-sodium curl tar unzip xfsprogs firewalld policycoreutils policycoreutils-python-utils MariaDB-client MariaDB-shared)
+      packages_installed=false
+      package_deadline=$((SECONDS + 900))
+      while (( SECONDS < package_deadline )); do
+        repository_bootstrapped=true
+        if ! rpm -q epel-release >/dev/null 2>&1; then
+          timeout --signal=TERM --kill-after=10s 120s dnf install -y --setopt=timeout=15 --setopt=retries=2 epel-release || repository_bootstrapped=false
+        fi
+        if [[ "$${repository_bootstrapped}" == true ]] && ! rpm -q remi-release >/dev/null 2>&1; then
+          timeout --signal=TERM --kill-after=10s 120s dnf install -y --setopt=timeout=15 --setopt=retries=2 https://rpms.remirepo.net/enterprise/remi-release-8.rpm || repository_bootstrapped=false
+        fi
+        if [[ "$${repository_bootstrapped}" == true ]] && timeout --signal=TERM --kill-after=10s 120s dnf --setopt=timeout=15 --setopt=retries=2 module disable -y mariadb && timeout --signal=TERM --kill-after=10s 120s dnf --setopt=timeout=15 --setopt=retries=2 module reset -y php && timeout --signal=TERM --kill-after=10s 120s dnf --setopt=timeout=15 --setopt=retries=2 module enable -y php:remi-8.3 && timeout --signal=TERM --kill-after=10s 300s dnf install -y --setopt=timeout=15 --setopt=retries=2 "$${required_packages[@]}"; then
+          packages_installed=true
+          break
+        fi
+        sleep 5
+      done
+      [[ "$${packages_installed}" == true ]] || { printf 'Required application packages did not install within the retry budget\n' >&2; exit 1; }
+      if grep -q '^SELINUX=' /etc/selinux/config; then sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config; else printf '\nSELINUX=enforcing\n' >> /etc/selinux/config; fi
+      setenforce 1
+      [[ "$(getenforce)" == Enforcing ]] || { printf 'SELinux is not enforcing\n' >&2; exit 1; }
+      php -r 'if (version_compare(PHP_VERSION, "8.2.0", "<")) { fwrite(STDERR, "Moodle requires PHP 8.2 or newer\n"); exit(1); }'
+      volume="${volume_device}"
+      for attempt in $(seq 1 60); do
+        if [[ -b "$${volume}" ]]; then break; fi
+        sleep 5
+      done
+      [[ -b "$${volume}" ]] || { printf 'Required Cinder data disk is missing: %s\n' "$${volume}" >&2; exit 1; }
+      [[ $(lsblk -ndo TYPE "$${volume}") == disk ]] || { printf 'Expected a whole non-root Cinder disk: %s\n' "$${volume}" >&2; exit 1; }
+      root_source=$(findmnt -no SOURCE /)
+      volume_real=$(readlink -f "$${volume}")
+      root_real=$(readlink -f "$${root_source}" 2>/dev/null || true)
+      [[ "$${volume_real}" != "$${root_real}" && "$${volume}" != /dev/vda ]] || { printf 'Refusing to use the root disk for Moodle local data\n' >&2; exit 1; }
+      volume_uuid=$(blkid -s UUID -o value "$${volume}" 2>/dev/null || true)
+      if [[ -z "$${volume_uuid}" ]]; then
+        mkfs.xfs -f "$${volume}"
+        volume_uuid=$(blkid -s UUID -o value "$${volume}")
+      fi
+      [[ -n "$${volume_uuid}" ]] || { printf 'Cinder Moodle data disk has no filesystem UUID\n' >&2; exit 1; }
+      dataroot_volume="${dataroot_volume_device}"
+      for attempt in $(seq 1 60); do
+        if [[ -b "$${dataroot_volume}" ]]; then break; fi
+        sleep 5
+      done
+      [[ -b "$${dataroot_volume}" ]] || { printf 'Required Cinder Moodle dataroot disk is missing: %s\n' "$${dataroot_volume}" >&2; exit 1; }
+      [[ $(lsblk -ndo TYPE "$${dataroot_volume}") == disk ]] || { printf 'Expected a whole non-root Cinder dataroot disk: %s\n' "$${dataroot_volume}" >&2; exit 1; }
+      dataroot_root_source=$(findmnt -no SOURCE /)
+      dataroot_volume_real=$(readlink -f "$${dataroot_volume}")
+      dataroot_root_real=$(readlink -f "$${dataroot_root_source}" 2>/dev/null || true)
+      [[ "$${dataroot_volume_real}" != "$${dataroot_root_real}" && "$${dataroot_volume}" != /dev/vda ]] || { printf 'Refusing to use the root disk for Moodle dataroot\n' >&2; exit 1; }
+      dataroot_volume_uuid=$(blkid -s UUID -o value "$${dataroot_volume}" 2>/dev/null || true)
+      if [[ -z "$${dataroot_volume_uuid}" ]]; then
+        mkfs.xfs -f "$${dataroot_volume}"
+        dataroot_volume_uuid=$(blkid -s UUID -o value "$${dataroot_volume}")
+      fi
+      [[ -n "$${dataroot_volume_uuid}" ]] || { printf 'Cinder Moodle dataroot disk has no filesystem UUID\n' >&2; exit 1; }
+      [[ $(blkid -s TYPE -o value "$${dataroot_volume}") == xfs ]] || { printf 'Cinder Moodle dataroot disk is not XFS\n' >&2; exit 1; }
+      mkdir -p /var/lib/moodledata
+      sed -i '\|[[:space:]]/var/lib/moodledata[[:space:]]|d' /etc/fstab
+      printf 'UUID=%s /var/lib/moodledata xfs defaults 0 2\n' "$${volume_uuid}" >> /etc/fstab
+      mountpoint -q /var/lib/moodledata || mount /var/lib/moodledata || { printf 'Required Cinder Moodle mount is absent\n' >&2; exit 1; }
+      [[ $(findmnt -no UUID /var/lib/moodledata) == "$${volume_uuid}" ]] || exit 1
+      mkdir -p /mnt/moodle-dataroot
+      sed -i '\|[[:space:]]/mnt/moodle-dataroot[[:space:]]|d' /etc/fstab
+      printf 'UUID=%s /mnt/moodle-dataroot xfs defaults 0 2\n' "$${dataroot_volume_uuid}" >> /etc/fstab
+      mountpoint -q /mnt/moodle-dataroot || mount /mnt/moodle-dataroot || { printf 'Required Cinder Moodle dataroot mount is absent\n' >&2; exit 1; }
+      [[ $(findmnt -no UUID /mnt/moodle-dataroot) == "$${dataroot_volume_uuid}" ]] || exit 1
+      [[ $(findmnt -no FSTYPE /mnt/moodle-dataroot) == xfs ]] || exit 1
+      semanage fcontext -a -t httpd_sys_rw_content_t '/var/lib/moodledata(/.*)?' 2>/dev/null || semanage fcontext -m -t httpd_sys_rw_content_t '/var/lib/moodledata(/.*)?'
+      semanage fcontext -a -t httpd_sys_rw_content_t '/mnt/moodle-dataroot(/.*)?' 2>/dev/null || semanage fcontext -m -t httpd_sys_rw_content_t '/mnt/moodle-dataroot(/.*)?'
+      mkdir -p /mnt/moodle-dataroot/moodledata /var/lib/moodledata/localcache /var/lib/moodledata/temp /var/www/health
+      restorecon -RF /var/lib/moodledata /mnt/moodle-dataroot
+      archive=/var/cache/moodle-${moodle_version}.tgz
+      archive_tmp="$${archive}.tmp"
+      moodle_downloaded=false
+      download_deadline=$((SECONDS + 900))
+      while (( SECONDS < download_deadline )); do
+        if [[ -f "$${archive}" ]] && printf '%s  %s\n' '${moodle_sha256}' "$${archive}" | sha256sum -c - >/dev/null 2>&1; then
+          moodle_downloaded=true
+          break
+        fi
+        rm -f "$${archive}" "$${archive_tmp}"
+        if timeout --signal=TERM --kill-after=10s 150s curl --fail --show-error --location --connect-timeout 15 --max-time 120 --retry 3 --retry-delay 5 --retry-max-time 100 --output "$${archive_tmp}" https://packaging.moodle.org/${moodle_branch}/moodle-${moodle_version}.tgz && printf '%s  %s\n' '${moodle_sha256}' "$${archive_tmp}" | sha256sum -c - >/dev/null 2>&1; then
+          mv -f "$${archive_tmp}" "$${archive}"
+          moodle_downloaded=true
+          break
+        fi
+        rm -f "$${archive}" "$${archive_tmp}"
+        sleep 5
+      done
+      [[ "$${moodle_downloaded}" == true ]] || { printf 'Pinned Moodle archive was not downloaded and verified within the retry budget\n' >&2; exit 1; }
+      mkdir -p /var/www/moodle
+      [[ -f /var/www/moodle/config.php ]] || tar -xzf "$${archive}" --strip-components=1 -C /var/www/moodle
+      cat > /var/www/moodle/config.php <<'PHP'
+      <?php
+      unset($CFG);
+      global $CFG;
+      $CFG = new stdClass();
+      $CFG->dbtype = 'mariadb';
+      $CFG->dblibrary = 'native';
+      $CFG->dbhost = '${db_host}';
+      $CFG->dbname = '${db_name}';
+      $CFG->dbuser = '${db_user}';
+      $CFG->dbpass = base64_decode('${db_password_b64}', true);
+      if ($CFG->dbpass === false) { throw new RuntimeException('Moodle database password encoding is invalid'); }
+      $CFG->prefix = 'mdl_';
+      $CFG->wwwroot = 'http://${developer_slug}.${base_domain}';
+      $CFG->dataroot = '/mnt/moodle-dataroot/moodledata';
+      $CFG->localcachedir = '/var/lib/moodledata/localcache';
+      $CFG->tempdir = '/var/lib/moodledata/temp';
+      $CFG->directorypermissions = 02770;
+      require_once(__DIR__ . '/lib/setup.php');
+      PHP
+      printf 'healthy ${developer_slug} app${app_index}\n' > /var/www/health/index.html
+      chown -R root:apache /var/www/moodle
+      chown -R apache:apache /var/lib/moodledata /mnt/moodle-dataroot /var/www/health
+      chown root:apache /var/www/moodle/config.php
+      chmod 0640 /var/www/moodle/config.php
+      restorecon -RF /var/www
+      for selinux_boolean in httpd_can_network_connect_db httpd_can_network_connect; do
+        setsebool -P "$${selinux_boolean}" 1
+      done
+      systemctl enable --now php-fpm
+      systemctl enable --now httpd
+      configure_firewalld() (
+        set -euo pipefail
+        restore_selinux() {
+          setenforce 1
+        }
+        trap restore_selinux EXIT
+        systemctl enable --now firewalld
+        setenforce 0
+        timeout --signal=TERM --kill-after=5s 30s firewall-cmd --permanent --add-service=http
+        timeout --signal=TERM --kill-after=5s 30s firewall-cmd --permanent --add-service=ssh
+        timeout --signal=TERM --kill-after=5s 30s firewall-cmd --permanent --add-port=9200/tcp
+        timeout --signal=TERM --kill-after=5s 30s firewall-cmd --reload
+        timeout --signal=TERM --kill-after=5s 30s systemctl restart firewalld
+        setenforce 1
+        trap - EXIT
+      )
+      configure_firewalld
+      [[ "$(getenforce)" == Enforcing ]] || { printf 'SELinux was not restored to enforcing after firewalld configuration\n' >&2; exit 1; }
+  - path: /etc/systemd/system/techsprint-app-health.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      After=network-online.target
+      [Service]
+      ExecStart=/usr/bin/python3 -m http.server 9200 --directory /var/www/health
+      Restart=always
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+  - [bash, /usr/local/sbin/techsprint-app-bootstrap]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, techsprint-app-health.service]
+final_message: TECHSPRINT_APP_READY_${developer_slug}_${app_index}

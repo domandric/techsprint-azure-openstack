@@ -1,0 +1,11 @@
+{% for app in azure_lead_app_hosts | sort(attribute='alias') %}
+Host {{ app.alias }}
+  HostName {{ app.ansible_host }}
+  User {{ app.ansible_user }}
+  IdentityFile /home/{{ ansible_user }}/.ssh/id_ed25519
+  IdentitiesOnly yes
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  PasswordAuthentication no
+  ConnectTimeout 10
+{% endfor %}

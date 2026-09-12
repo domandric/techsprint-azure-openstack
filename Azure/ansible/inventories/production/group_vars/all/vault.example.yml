@@ -1,0 +1,11 @@
+---
+moodle_secrets:
+  replace-with-tenant-slug:
+    db_name: moodle_<slug>
+    db_user: moodle
+    db_password: REPLACE_WITH_GENERATED_DB_PASSWORD
+    mysql_admin_user: REPLACE_WITH_MYSQL_ADMINISTRATOR_LOGIN
+    mysql_admin_password: REPLACE_WITH_MYSQL_ADMINISTRATOR_PASSWORD
+    admin_user: REPLACE_WITH_MOODLE_ADMIN_USERNAME
+    admin_password: REPLACE_WITH_MOODLE_ADMIN_PASSWORD_MIN_8_CHARS
+    admin_email: REPLACE_WITH_MOODLE_ADMIN_EMAIL@example.test

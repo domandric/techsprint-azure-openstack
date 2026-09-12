@@ -1,0 +1,37 @@
+<?php
+http_response_code(503);
+header('Content-Type: text/plain');
+$ok = true;
+
+function moodle_is_mount_ready($mount_path, $expected_deployment_id) {
+    if (!is_string($mount_path) || $mount_path === '') { return false; }
+    if (!is_string($expected_deployment_id) || $expected_deployment_id === '') { return false; }
+    $marker_path = $mount_path . '/.techsprint-mount-ready';
+    if (!is_dir($mount_path) || !is_file($marker_path) || !is_readable($marker_path)) { return false; }
+    $marker_stat = @lstat($marker_path);
+    if (!is_array($marker_stat) || (($marker_stat['mode'] & 0170000) !== 0100000)) { return false; }
+    $marker_contents = @file_get_contents($marker_path);
+    if (!is_string($marker_contents)) { return false; }
+    return hash_equals($expected_deployment_id, trim($marker_contents));
+}
+
+try {
+    $mysqlhost = base64_decode('{{ mysql_fqdn | b64encode }}');
+    $dbname = base64_decode('{{ moodle_secrets[tenant_slug].db_name | b64encode }}');
+    $dsn = 'mysql:host=' . $mysqlhost . ';dbname=' . $dbname . ';charset=utf8mb4';
+    $pdo = new PDO($dsn, base64_decode('{{ moodle_secrets[tenant_slug].db_user | b64encode }}'), base64_decode('{{ moodle_secrets[tenant_slug].db_password | b64encode }}'), array(
+        PDO::MYSQL_ATTR_SSL_CA => base64_decode('{{ mysql_ca_bundle_path | b64encode }}'),
+        PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT => true,
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    ));
+    $pdo->query('SELECT 1');
+} catch (Throwable $ignored) { error_log('Moodle readiness database dependency failed'); $ok = false; }
+
+$expected_deployment_id = base64_decode('{{ azure_deployment_id | b64encode }}', true);
+$moodle_shared_mount = base64_decode('{{ moodle_shared_mount | b64encode }}');
+$moodle_objects_mount = base64_decode('{{ moodle_objects_mount | b64encode }}');
+$moodle_local_mount = base64_decode('{{ moodle_local_mount | b64encode }}');
+if (!moodle_is_mount_ready($moodle_shared_mount, $expected_deployment_id)) { error_log('Moodle readiness shared mount dependency failed'); $ok = false; }
+if (!moodle_is_mount_ready($moodle_objects_mount, $expected_deployment_id)) { error_log('Moodle readiness object mount dependency failed'); $ok = false; }
+if (!moodle_is_mount_ready($moodle_local_mount, $expected_deployment_id)) { error_log('Moodle readiness local mount dependency failed'); $ok = false; }
+if ($ok) { http_response_code(200); echo "ready\\n"; } else { echo "not-ready\\n"; }

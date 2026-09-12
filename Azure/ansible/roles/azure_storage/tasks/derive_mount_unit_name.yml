@@ -1,0 +1,22 @@
+---
+- name: Require a safe, absolute Azure Files mount path for systemd unit-name derivation
+  ansible.builtin.assert:
+    that:
+      - azure_files_mount is match('^/[A-Za-z0-9_/-]+$')
+      - azure_files_mount != '/'
+      - not (azure_files_mount is search('//'))
+      - not (azure_files_mount is search('/\.'))
+    fail_msg: >-
+      azure_files_mount must be a simple non-root absolute path (letters,
+      digits, underscore, hyphen, single slashes, no dot segments) so its
+      systemd mount-unit name can be derived safely.
+
+- name: Derive the Azure Files mount unit name with systemd-escape
+  ansible.builtin.command:
+    argv: [systemd-escape, --path, --suffix=mount, '{{ azure_files_mount }}']
+  register: azure_files_mount_unit_name_result
+  changed_when: false
+
+- name: Store the systemd-escaped Azure Files mount unit name
+  ansible.builtin.set_fact:
+    azure_files_mount_unit_name: '{{ azure_files_mount_unit_name_result.stdout }}'

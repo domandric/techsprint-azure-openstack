@@ -1,0 +1,13 @@
+[Unit]
+Description=Azure Moodle BlobFuse2 object mount
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/blobfuse2 mount {{ azure_blob_mount }} --config-file=/etc/blobfuse2-moodle.yaml --allow-other
+ExecStop=/bin/fusermount3 -u {{ azure_blob_mount }}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

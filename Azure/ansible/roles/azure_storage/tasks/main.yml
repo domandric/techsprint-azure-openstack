@@ -1,0 +1,275 @@
+---
+- name: Require Azure Files NFS topology
+  ansible.builtin.assert:
+    that:
+      - files_endpoint is defined
+      - files_endpoint is match('^[a-z0-9]{3,24}\\.file\\.core\\.windows\\.net$')
+      - files_share_name == 'moodle'
+      - files_protocol == 'NFSv4.1'
+      - files_authorization == 'AUTH_SYS'
+      - blob_endpoint is defined
+      - blob_container_name == 'moodle-objects'
+      - uami_client_id is defined
+    fail_msg: >-
+      Azure Files requires the locked private DNS endpoint, Moodle NFS share,
+      and NFSv4.1/AUTH_SYS settings.
+      No credentialed or public-endpoint fallback is permitted.
+
+- name: Derive the systemd-escaped Azure Files NFS mount unit name from azure_files_mount
+  ansible.builtin.include_tasks: derive_mount_unit_name.yml
+
+- name: Download the Microsoft package-signing GPG key
+  ansible.builtin.get_url:
+    url: '{{ blobfuse2_repo_gpg_key_url }}'
+    dest: /etc/pki/rpm-gpg/RPM-GPG-KEY-microsoft-2025
+    checksum: 'sha256:{{ blobfuse2_repo_gpg_key_sha256 }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Read the Microsoft package-signing key fingerprint
+  ansible.builtin.command:
+    argv: [gpg, --batch, --show-keys, --with-colons, /etc/pki/rpm-gpg/RPM-GPG-KEY-microsoft-2025]
+  register: azure_storage_gpg_key
+  changed_when: false
+
+- name: Require the pinned Microsoft signing key fingerprint
+  ansible.builtin.assert:
+    that:
+      - ('fpr:::::::::' ~ blobfuse2_repo_gpg_key_fingerprint ~ ':') in azure_storage_gpg_key.stdout
+    fail_msg: >-
+      The Microsoft package-signing key fingerprint does not match the pinned
+      value. Refusing to trust an unverified BlobFuse2 package source.
+
+- name: Import the Microsoft package-signing GPG key
+  ansible.builtin.rpm_key:
+    key: /etc/pki/rpm-gpg/RPM-GPG-KEY-microsoft-2025
+    state: present
+
+- name: Configure the Microsoft production package repository for BlobFuse2
+  ansible.builtin.yum_repository:
+    name: packages-microsoft-com-prod
+    description: Microsoft Production (Rocky Linux 10 / RHEL 10 compatible)
+    baseurl: '{{ blobfuse2_repo_baseurl }}'
+    gpgcheck: true
+    repo_gpgcheck: true
+    gpgkey: 'file:///etc/pki/rpm-gpg/RPM-GPG-KEY-microsoft-2025'
+    sslverify: true
+    enabled: true
+    mode: '0644'
+
+- name: Install Azure Files NFS and BlobFuse prerequisites
+  ansible.builtin.dnf:
+    name: [nfs-utils, fuse3, blobfuse2, rsync]
+    state: present
+
+- name: Permit the nginx service account to access the restrictive BlobFuse mount
+  ansible.builtin.lineinfile:
+    path: /etc/fuse.conf
+    regexp: '^#?user_allow_other$'
+    line: user_allow_other
+    create: false
+    mode: '0644'
+
+- name: Create Azure storage mount paths
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+  loop: ['{{ azure_files_mount }}', '{{ azure_blob_mount }}']
+
+- name: Resolve Azure Files endpoint through private DNS
+  ansible.builtin.command:
+    argv: [getent, ahostsv4, '{{ files_endpoint }}']
+  register: azure_files_dns
+  changed_when: false
+  failed_when: false
+
+- name: Require Azure Files endpoint to resolve to a private address
+  ansible.builtin.assert:
+    that:
+      - azure_files_dns.rc == 0
+      - >-
+        azure_files_dns.stdout is regex(
+          '(?m)^(?:10(?:\\.[0-9]{1,3}){3}|172\\.(?:1[6-9]|2[0-9]|3[0-1])(?:\\.[0-9]{1,3}){2}|192\\.168(?:\\.[0-9]{1,3}){2})\\s'
+        )
+    fail_msg: >-
+      BLOCKED: {{ files_endpoint }} does not resolve through the Azure Files private endpoint
+      to an RFC1918 address. Do not mount through a public endpoint.
+
+- name: Require Azure Files NFS port over the private endpoint
+  ansible.builtin.wait_for:
+    host: '{{ files_endpoint }}'
+    port: 2049
+    connect_timeout: 5
+    timeout: 30
+    state: started
+
+- name: Remove invalid legacy Azure Files mount unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/mnt-moodle-shared.mount
+    state: absent
+
+- name: Remove dangling enablement symlink for the invalid legacy Azure Files mount unit
+  ansible.builtin.file:
+    path: /etc/systemd/system/multi-user.target.wants/mnt-moodle-shared.mount
+    state: absent
+  notify: Reload systemd
+
+- name: Remove the stale fixed-default Azure Files mount unit when azure_files_mount no longer matches it
+  ansible.builtin.file:
+    path: '/etc/systemd/system/mnt-moodle\x2dshared.mount'
+    state: absent
+  when: azure_files_mount != '/mnt/moodle-shared'
+  notify: Reload systemd
+
+- name: Remove the dangling enablement symlink for the stale fixed-default Azure Files mount unit when azure_files_mount no longer matches it
+  ansible.builtin.file:
+    path: '/etc/systemd/system/multi-user.target.wants/mnt-moodle\x2dshared.mount'
+    state: absent
+  when: azure_files_mount != '/mnt/moodle-shared'
+  notify: Reload systemd
+
+- name: Install systemd unit for Azure Files NFS mount
+  ansible.builtin.template:
+    src: moodle-files.mount.j2
+    dest: '/etc/systemd/system/{{ azure_files_mount_unit_name }}'
+    mode: '0644'
+  notify: Reload systemd
+
+- name: Install BlobFuse2 MSI configuration
+  ansible.builtin.template:
+    src: blobfuse2.yaml.j2
+    dest: /etc/blobfuse2-moodle.yaml
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  notify: Restart Moodle BlobFuse mount
+
+- name: Install BlobFuse2 systemd service
+  ansible.builtin.template:
+    src: moodle-blobfuse.service.j2
+    dest: /etc/systemd/system/moodle-blobfuse.service
+    mode: '0644'
+  notify: Reload systemd
+
+- name: Reload systemd before starting persistent storage mounts
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Enable persistent NFS and BlobFuse mounts
+  ansible.builtin.systemd:
+    name: '{{ item }}'
+    enabled: true
+    state: started
+  loop: ['{{ azure_files_mount_unit_name }}', moodle-blobfuse.service]
+
+- name: Check every exact Moodle mountpoint before writing readiness markers
+  ansible.builtin.command:
+    argv: [findmnt, -n, --mountpoint, '{{ item }}']
+  register: azure_mount_readiness_checks
+  changed_when: false
+  failed_when: false
+  loop: ['{{ moodle_local_mount }}', '{{ azure_files_mount }}', '{{ azure_blob_mount }}']
+
+- name: Require all exact Moodle mountpoint checks to succeed before marker creation
+  ansible.builtin.assert:
+    that:
+      - azure_mount_readiness_checks.results | length == 3
+      - >-
+        (azure_mount_readiness_checks.results
+        | selectattr('rc', 'equalto', 0) | list | length) == 3
+    fail_msg: >-
+      Refusing to write deployment-bound readiness markers: exact findmnt
+      checks did not positively confirm the local XFS, Azure Files, and BlobFuse
+      mountpoints.
+
+- name: Verify that Azure Files is mounted as NFSv4.1
+  ansible.builtin.command:
+    argv: [findmnt, -n, -o, 'FSTYPE,OPTIONS', --target, '{{ azure_files_mount }}']
+  register: azure_files_mount_state
+  changed_when: false
+
+- name: Require expected Azure Files NFS mount options
+  ansible.builtin.assert:
+    that:
+      - azure_files_mount_state.stdout is search('^nfs')
+      - azure_files_mount_state.stdout is search('vers=4\\.1')
+      - azure_files_mount_state.stdout is search('sec=sys')
+      - azure_files_mount_state.stdout is search('nconnect=4')
+      - azure_files_mount_state.stdout is search('noresvport')
+    fail_msg: 'Azure Files mount is not the required NFSv4.1 AUTH_SYS private-endpoint mount.'
+
+- name: Verify nginx can access managed NFS and Blob mount roots
+  ansible.builtin.command:
+    argv: [runuser, -u, nginx, --, test, -r, '{{ item }}']
+  changed_when: false
+  loop: ['{{ azure_files_mount }}', '{{ azure_blob_mount }}']
+
+- name: Create shared Moodle directories
+  ansible.builtin.file:
+    path: '{{ azure_files_mount }}/{{ item }}'
+    state: directory
+    owner: nginx
+    group: nginx
+    mode: '0770'
+  loop: [moodledata, temp, backuptemp, course-backups]
+
+- name: Create the Blob-mounted Moodle backup replica path
+  ansible.builtin.file:
+    path: '{{ azure_blob_mount }}/moodle-files/course-backups'
+    state: directory
+    owner: nginx
+    group: nginx
+    mode: '0770'
+
+- name: Require nginx write access to both backup stores
+  ansible.builtin.command:
+    argv: [runuser, -u, nginx, --, test, -w, '{{ item }}']
+  loop:
+    - '{{ azure_files_mount }}/course-backups'
+    - '{{ azure_blob_mount }}/moodle-files/course-backups'
+  changed_when: false
+
+- name: Create deployment-bound readiness markers on verified mounted filesystems
+  ansible.builtin.copy:
+    dest: '{{ item }}/{{ azure_mount_ready_marker }}'
+    content: "{{ azure_deployment_id }}\n"
+    owner: nginx
+    group: nginx
+    mode: '0640'
+  loop: ['{{ moodle_local_mount }}', '{{ azure_files_mount }}', '{{ azure_blob_mount }}']
+
+- name: Install Moodle backup replication service
+  ansible.builtin.template:
+    src: moodle-backup-replica.service.j2
+    dest: /etc/systemd/system/moodle-backup-replica.service
+    mode: '0644'
+  when: app_role | default('') == 'app01'
+  notify: Reload systemd
+
+- name: Install Moodle backup replication timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/moodle-backup-replica.timer
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Replicate Moodle backups to Azure Blob
+
+      [Timer]
+      OnBootSec=5m
+      OnUnitActiveSec=5m
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+  when: app_role | default('') == 'app01'
+  notify: Reload systemd
+
+- name: Enable Moodle backup replication timer on app01
+  ansible.builtin.systemd:
+    name: moodle-backup-replica.timer
+    daemon_reload: true
+    enabled: true
+    state: started
+  when: app_role | default('') == 'app01'

@@ -1,0 +1,26 @@
+<?php
+unset($CFG);
+global $CFG;
+$CFG = new stdClass();
+
+$CFG->wwwroot = base64_decode('{{ ('http://' ~ moodle_hostname ~ ':8080') | b64encode }}');
+$CFG->dataroot = base64_decode('{{ (moodle_shared_mount ~ '/moodledata') | b64encode }}');
+$CFG->localcachedir = base64_decode('{{ (moodle_local_mount ~ '/localcache') | b64encode }}');
+$CFG->tempdir = base64_decode('{{ (moodle_shared_mount ~ '/temp') | b64encode }}');
+$CFG->backuptempdir = base64_decode('{{ (moodle_shared_mount ~ '/backuptemp') | b64encode }}');
+$CFG->dbhost = base64_decode('{{ mysql_fqdn | b64encode }}');
+$CFG->dbtype = 'mysqli';
+$CFG->prefix = base64_decode('{{ moodle_db_prefix | b64encode }}');
+$CFG->dbname = base64_decode('{{ moodle_secrets[tenant_slug].db_name | b64encode }}');
+$CFG->dbuser = base64_decode('{{ moodle_secrets[tenant_slug].db_user | b64encode }}');
+$CFG->dbpass = base64_decode('{{ moodle_secrets[tenant_slug].db_password | b64encode }}');
+$CFG->dboptions = array('dbcollation' => 'utf8mb4_unicode_ci', 'ssl' => 'verify-full');
+$CFG->forced_plugin_settings['backup']['backup_auto_active'] = 1;
+$CFG->forced_plugin_settings['backup']['backup_auto_weekdays'] = '1111111';
+$CFG->forced_plugin_settings['backup']['backup_auto_hour'] = 2;
+$CFG->forced_plugin_settings['backup']['backup_auto_minute'] = 0;
+$CFG->forced_plugin_settings['backup']['backup_auto_storage'] = 2;
+$CFG->forced_plugin_settings['backup']['backup_auto_destination'] = base64_decode('{{ (moodle_shared_mount ~ '/course-backups') | b64encode }}');
+$CFG->forced_plugin_settings['backup']['backup_auto_keep'] = 5;
+
+require_once(__DIR__ . '/lib/setup.php');

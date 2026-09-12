@@ -1,0 +1,108 @@
+---
+- name: Configure Jump NVA before private hosts
+  hosts: jump
+  gather_facts: true
+  become: true
+  pre_tasks:
+    - name: Require Rocky Linux 10
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Rocky'
+          - ansible_facts.distribution_major_version == '10'
+        fail_msg: This deployment supports only Rocky Linux 10; no OS fallback is permitted.
+      tags: [always]
+  roles:
+    - role: common
+    - role: jump
+
+- name: Configure Lead administration host
+  hosts: lead
+  gather_facts: true
+  become: true
+  pre_tasks:
+    - name: Require Rocky Linux 10
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Rocky'
+          - ansible_facts.distribution_major_version == '10'
+        fail_msg: This deployment supports only Rocky Linux 10; no OS fallback is permitted.
+      tags: [always]
+  roles:
+    - role: common
+    - role: lead
+
+- name: Configure Moodle application nodes
+  hosts: app
+  gather_facts: true
+  become: true
+  pre_tasks:
+    - name: Require Rocky Linux 10
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.distribution == 'Rocky'
+          - ansible_facts.distribution_major_version == '10'
+        fail_msg: This deployment supports only Rocky Linux 10; no OS fallback is permitted.
+      tags: [always]
+    - name: Install application service-account prerequisite
+      ansible.builtin.dnf:
+        name: nginx
+        state: present
+    - name: Require the generated Lead operational public key
+      ansible.builtin.assert:
+        that:
+          - groups['lead'] | length == 1
+          - hostvars[groups['lead'][0]].lead_operational_ssh_public_key is defined
+          - hostvars[groups['lead'][0]].lead_operational_ssh_public_key is match('^ssh-ed25519[ \t]+[A-Za-z0-9+/]+={0,2}(?:[ \t]+[A-Za-z0-9._:@%+=,-]+)?$')
+          - hostvars[groups['lead'][0]].lead_operational_ssh_public_key is not search('[\r\n]')
+        fail_msg: >-
+          The Lead play did not publish a valid operational public key. Refusing
+          to configure app SSH access from any other key source.
+      no_log: true
+    - name: Authorize only the generated Lead operational public key for app operations
+      ansible.posix.authorized_key:
+        user: '{{ ansible_user }}'
+        key: '{{ hostvars[groups["lead"][0]].lead_operational_ssh_public_key }}'
+        state: present
+        manage_dir: true
+      no_log: true
+  roles:
+    - role: common
+    - role: disk
+    - role: azure_storage
+    - role: moodle
+    - role: healthcheck
+
+- name: Verify Lead operational SSH path to every private app
+  hosts: lead
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Require the complete Lead app SSH topology before verification
+      ansible.builtin.assert:
+        that:
+          - azure_lead_app_hosts is defined
+          - azure_lead_app_hosts | length > 0
+          - (azure_lead_app_hosts | map(attribute='alias') | unique | list | length) == (azure_lead_app_hosts | length)
+          - (azure_lead_app_hosts | map(attribute='ansible_host') | unique | list | length) == (azure_lead_app_hosts | length)
+        fail_msg: Lead app SSH topology is incomplete or non-unique; refusing verification.
+      no_log: true
+
+    - name: Verify noninteractive direct private SSH to every app alias
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/ssh
+          - -F
+          - /home/{{ ansible_user }}/.ssh/config
+          - -o
+          - BatchMode=yes
+          - -o
+          - PasswordAuthentication=no
+          - '{{ item.alias }}'
+          - /usr/bin/true
+      register: lead_app_ssh_verification
+      changed_when: false
+      failed_when: lead_app_ssh_verification.rc != 0
+      loop: "{{ azure_lead_app_hosts | sort(attribute='alias') }}"
+      loop_control:
+        label: '{{ item.alias }}'
+      no_log: true

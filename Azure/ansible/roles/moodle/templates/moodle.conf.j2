@@ -1,0 +1,11 @@
+server {
+  listen 80;
+  server_name {{ moodle_hostname }};
+  root {{ moodle_root }}/public;
+  index index.php;
+  location = /healthz { add_header X-Backend-Host $hostname always; return 200; }
+  location = /whoami { add_header X-Backend-Host $hostname always; add_header X-Azure-Deployment-ID "{{ azure_deployment_id }}" always; return 200 "$hostname {{ azure_deployment_id }}\n"; }
+  location = /readyz { include fastcgi_params; fastcgi_param SCRIPT_FILENAME {{ moodle_root }}/readyz.php; fastcgi_param AZURE_DEPLOYMENT_ID "{{ azure_deployment_id }}"; fastcgi_pass unix:/run/php-fpm/www.sock; }
+  location / { try_files $uri $uri/ /index.php?$query_string; }
+  location ~ \.php$ { include fastcgi_params; fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name; fastcgi_pass unix:/run/php-fpm/www.sock; }
+}

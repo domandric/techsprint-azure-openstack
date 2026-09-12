@@ -1,0 +1,7 @@
+{
+    "_comment": "Tracked, non-secret, human-audited standing approval for the Rocky Linux 10 Azure Marketplace legal terms gate in Deploy-Azure.ps1 (Invoke-DeployRockyMarketplaceTermsGate). This file authorizes automatic, no-prompt acceptance ONLY when 'accepted' is the exact JSON boolean true AND 'publisher'/'offer'/'sku' below match the exact image identity being deployed. Any other value (false, absent, a string, a number, or a mismatched publisher/offer/sku) leaves the existing interactive prompt / -RockyMarketplaceTermsConfirmation phrase behavior completely unchanged. Recorded here because the repository owner explicitly reviewed and approved automatic acceptance of these exact Marketplace terms for their own subscription. To revoke: set 'accepted' back to false (or delete this file) -- no code change is required either way.",
+    "accepted": true,
+    "publisher": "resf",
+    "offer": "rockylinux-x86_64",
+    "sku": "10-lvm"
+}

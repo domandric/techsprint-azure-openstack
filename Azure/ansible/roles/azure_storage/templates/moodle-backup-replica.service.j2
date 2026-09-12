@@ -1,0 +1,10 @@
+[Unit]
+Description=Replicate Moodle-generated backups from Azure Files to Blob
+After=network-online.target {{ azure_files_mount_unit_name }} moodle-blobfuse.service
+Requires={{ azure_files_mount_unit_name }} moodle-blobfuse.service
+
+[Service]
+Type=oneshot
+User=nginx
+Group=nginx
+ExecStart=/usr/bin/rsync -rt --exclude=.moodle-installed {{ azure_files_mount }}/course-backups/ {{ azure_blob_mount }}/moodle-files/course-backups/

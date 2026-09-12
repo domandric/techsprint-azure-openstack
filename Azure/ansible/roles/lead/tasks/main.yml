@@ -1,0 +1,179 @@
+---
+- name: Require the complete generated application inventory for Lead operations
+  ansible.builtin.assert:
+    that:
+      - groups['lead'] | length == 1
+      - "'app' in groups"
+      - groups['app'] | length > 0
+    fail_msg: >-
+      The Lead operational SSH path requires exactly one Lead and a non-empty
+      Terraform-generated app inventory. Do not supply a hand-written overlay.
+  tags: [generated_inventory]
+
+- name: Build deterministic private application SSH topology for the Lead
+  ansible.builtin.set_fact:
+    azure_lead_app_hosts: >-
+      {{
+        (azure_lead_app_hosts | default([]))
+        + [{
+          'inventory_hostname': item,
+          'alias': 'app-' ~ (hostvars[item].tenant_slug | default('', true)) ~ '-' ~ (hostvars[item].app_role | default('', true)),
+          'tenant_slug': hostvars[item].tenant_slug | default('', true),
+          'app_role': hostvars[item].app_role | default('', true),
+          'ansible_host': hostvars[item].ansible_host | default('', true),
+          'ansible_user': hostvars[item].ansible_user | default(ansible_user, true)
+        }]
+      }}
+  loop: "{{ groups['app'] | sort }}"
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Require complete and private generated application SSH topology
+  ansible.builtin.assert:
+    that:
+      - item.alias is match('^app-[a-z0-9]+(?:-[a-z0-9]+)*-(?:app01|app02)$')
+      - item.tenant_slug is match('^[a-z0-9]+(?:-[a-z0-9]+)*$')
+      - item.app_role in ['app01', 'app02']
+      - item.ansible_host is match('^(?:10\.|192\.168\.|172\.(?:1[6-9]|2[0-9]|3[0-1])\.)')
+      - item.ansible_user | length > 0
+    fail_msg: >-
+      A generated app host is missing its tenant, app role, private address, or
+      SSH user. Refusing to create a Lead path that could use public access.
+  loop: "{{ azure_lead_app_hosts }}"
+  loop_control:
+    label: generated app topology
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Collect generated tenant slugs for Lead topology checks
+  ansible.builtin.set_fact:
+    azure_lead_tenant_slugs: "{{ azure_lead_app_hosts | map(attribute='tenant_slug') | unique | sort | list }}"
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Require exactly one app01 and app02 for every generated tenant
+  ansible.builtin.assert:
+    that:
+      - (azure_lead_app_hosts | selectattr('tenant_slug', 'equalto', item) | list | length) == 2
+      - (azure_lead_app_hosts | selectattr('tenant_slug', 'equalto', item) | selectattr('app_role', 'equalto', 'app01') | list | length) == 1
+      - (azure_lead_app_hosts | selectattr('tenant_slug', 'equalto', item) | selectattr('app_role', 'equalto', 'app02') | list | length) == 1
+    fail_msg: Every generated tenant must have exactly one app01 and one app02 for Lead verification.
+  loop: "{{ azure_lead_tenant_slugs }}"
+  loop_control:
+    label: generated tenant topology
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Require unique generated Lead SSH aliases and private addresses
+  ansible.builtin.assert:
+    that:
+      - (azure_lead_app_hosts | map(attribute='inventory_hostname') | unique | list | length) == (azure_lead_app_hosts | length)
+      - (azure_lead_app_hosts | map(attribute='alias') | unique | list | length) == (azure_lead_app_hosts | length)
+      - (azure_lead_app_hosts | map(attribute='ansible_host') | unique | list | length) == (azure_lead_app_hosts | length)
+    fail_msg: Generated app inventory contains duplicate SSH aliases or private addresses.
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Install Lead administration tools
+  ansible.builtin.dnf:
+    name: [git, ansible-core, openssh-clients, jq]
+    state: present
+
+- name: Restrict Lead SSH client key directory
+  ansible.builtin.file:
+    path: /home/{{ ansible_user }}/.ssh
+    state: directory
+    owner: '{{ ansible_user }}'
+    group: '{{ ansible_user }}'
+    mode: '0700'
+
+- name: Inspect Lead operational SSH key files
+  ansible.builtin.stat:
+    path: '{{ item }}'
+  loop:
+    - /home/{{ ansible_user }}/.ssh/id_ed25519
+    - /home/{{ ansible_user }}/.ssh/id_ed25519.pub
+  register: lead_operational_key_files
+
+- name: Refuse an incomplete Lead operational SSH key pair
+  ansible.builtin.assert:
+    that:
+      - (lead_operational_key_files.results[0].stat.exists | bool) == (lead_operational_key_files.results[1].stat.exists | bool)
+    fail_msg: >-
+      Lead operational SSH key state is incomplete. Restore or remove the
+      existing pair manually; Ansible will never overwrite a partial key pair.
+  no_log: true
+
+- name: Generate the Lead operational SSH key in place as the Lead user
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/ssh-keygen
+      - -q
+      - -t
+      - ed25519
+      - -N
+      - ''
+      - -C
+      - azure-lead-operational
+      - -f
+      - /home/{{ ansible_user }}/.ssh/id_ed25519
+  become_user: '{{ ansible_user }}'
+  when:
+    - not (lead_operational_key_files.results[0].stat.exists | bool)
+    - not (lead_operational_key_files.results[1].stat.exists | bool)
+  no_log: true
+
+- name: Enforce private permissions on the Lead operational key
+  ansible.builtin.file:
+    path: /home/{{ ansible_user }}/.ssh/id_ed25519
+    state: file
+    owner: '{{ ansible_user }}'
+    group: '{{ ansible_user }}'
+    mode: '0600'
+
+- name: Enforce public permissions on the Lead operational key half
+  ansible.builtin.file:
+    path: /home/{{ ansible_user }}/.ssh/id_ed25519.pub
+    state: file
+    owner: '{{ ansible_user }}'
+    group: '{{ ansible_user }}'
+    mode: '0644'
+
+- name: Read only the Lead operational public key
+  ansible.builtin.slurp:
+    src: /home/{{ ansible_user }}/.ssh/id_ed25519.pub
+  register: lead_operational_public_key_file
+  no_log: true
+
+- name: Cryptographically validate the Lead operational public key format
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/ssh-keygen
+      - -l
+      - -f
+      - /home/{{ ansible_user }}/.ssh/id_ed25519.pub
+  register: lead_operational_public_key_format
+  changed_when: false
+  failed_when: lead_operational_public_key_format.rc != 0
+  no_log: true
+
+- name: Publish the Lead operational public key as a protected fact
+  ansible.builtin.set_fact:
+    lead_operational_ssh_public_key: "{{ lead_operational_public_key_file.content | b64decode | trim }}"
+  no_log: true
+
+- name: Require a single valid Lead operational public key
+  ansible.builtin.assert:
+    that:
+      - lead_operational_ssh_public_key is match('^ssh-ed25519[ \t]+[A-Za-z0-9+/]+={0,2}(?:[ \t]+[A-Za-z0-9._:@%+=,-]+)?$')
+      - lead_operational_ssh_public_key is not search('[\r\n]')
+    fail_msg: Lead operational public-key material is missing or malformed.
+  no_log: true
+
+- name: Install deterministic private app SSH config on the Lead
+  ansible.builtin.template:
+    src: ssh_config.j2
+    dest: /home/{{ ansible_user }}/.ssh/config
+    owner: '{{ ansible_user }}'
+    group: '{{ ansible_user }}'
+    mode: '0600'

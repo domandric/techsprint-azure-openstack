@@ -1,0 +1,4 @@
+---
+moodle_data_device_candidates:
+  - /dev/disk/azure/data/by-lun/0
+  - /dev/disk/azure/scsi1/lun0

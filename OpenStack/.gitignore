@@ -1,0 +1,42 @@
+# Local deployment configuration retained from the repository root.
+config/openstack.env
+config/capabilities.json
+
+# Runtime credentials, generated backend HCL, and environment files.
+runtime/*
+**/runtime/*
+runtime/terraform-backend/
+runtime/terraform-state.env
+**/runtime/terraform-backend/
+**/runtime/terraform-state.env
+
+# Private SSH material.
+keys/*
+**/keys/*
+
+# Terraform working directories, state, generated renderer inputs/plans, crash
+# logs, and variables.
+.terraform/
+**/.terraform/
+runtime/terraform-inputs/
+runtime/plans/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+
+# Generated backend files and state environments outside runtime are private.
+terraform-backend/
+**/terraform-backend/
+terraform-state.env
+**/terraform-state.env
+
+# Checked-in examples, provider locks, and directory placeholders are allowed.
+!*.example.tfvars*
+!.terraform.lock.hcl
+!**/.terraform.lock.hcl
+!.gitkeep
+!**/.gitkeep

@@ -1,0 +1,319 @@
+---
+- name: Require generated application inventory
+  ansible.builtin.assert:
+    that:
+      - "'app' in groups"
+      - groups['app'] | length > 0
+    fail_msg: >-
+      Jump requires the Terraform-generated app inventory group. Do not create
+      a hand-written tunnel-account overlay.
+  tags: [generated_inventory]
+
+- name: Build application topology from generated inventory
+  ansible.builtin.set_fact:
+    azure_app_hosts: >-
+      {{
+        (azure_app_hosts | default([]))
+        + [{
+          'inventory_hostname': item,
+          'tenant_slug': hostvars[item].tenant_slug | default('', true),
+          'app_role': hostvars[item].app_role | default('', true),
+          'ansible_host': hostvars[item].ansible_host | default('', true),
+          'developer_ssh_public_key': hostvars[item].developer_ssh_public_key | default('', true),
+          'tenant_app_private_ips': hostvars[item].tenant_app_private_ips | default([], true) | list,
+          'mysql_allowed_client_ips': hostvars[item].mysql_allowed_client_ips | default([], true) | list
+        }]
+      }}
+  loop: "{{ groups['app'] | sort }}"
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Require complete generated application topology
+  ansible.builtin.assert:
+    that:
+      - item.tenant_slug is match('^[a-z0-9]+(?:-[a-z0-9]+)*$')
+      - item.app_role in ['app01', 'app02']
+      - item.ansible_host is match('^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
+      - item.developer_ssh_public_key is match('^(ssh-|ecdsa-sha2-|sk-ssh-)')
+      - item.tenant_app_private_ips is iterable
+      - item.tenant_app_private_ips is not string
+      - item.tenant_app_private_ips | length == 2
+      - item.tenant_app_private_ips | select('match', '^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$') | list | length == 2
+      - item.tenant_app_private_ips | unique | list | length == 2
+      - item.ansible_host in item.tenant_app_private_ips
+      - item.mysql_allowed_client_ips is iterable
+      - item.mysql_allowed_client_ips is not string
+      - item.mysql_allowed_client_ips | length == 2
+      - (item.mysql_allowed_client_ips | sort) == (item.tenant_app_private_ips | sort)
+    fail_msg: >-
+      Generated app inventory is incomplete or inconsistent. Regenerate the
+      Terraform inventory fragments; do not edit them by hand.
+  loop: "{{ azure_app_hosts }}"
+  loop_control:
+    label: generated app topology
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Collect generated tenant slugs
+  ansible.builtin.set_fact:
+    azure_tenant_slugs: "{{ azure_app_hosts | map(attribute='tenant_slug') | unique | sort | list }}"
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Require one app01 and app02 for every generated tenant
+  ansible.builtin.assert:
+    that:
+      - (azure_app_hosts | selectattr('tenant_slug', 'equalto', item) | list | length) == 2
+      - (azure_app_hosts | selectattr('tenant_slug', 'equalto', item) | selectattr('app_role', 'equalto', 'app01') | list | length) == 1
+      - (azure_app_hosts | selectattr('tenant_slug', 'equalto', item) | selectattr('app_role', 'equalto', 'app02') | list | length) == 1
+    fail_msg: >-
+      Each tenant must have exactly one app01 and one app02 in the generated
+      Terraform inventory.
+  loop: "{{ azure_tenant_slugs }}"
+  loop_control:
+    label: generated tenant topology
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Require unique generated application addresses
+  ansible.builtin.assert:
+    that:
+      - (azure_app_hosts | map(attribute='ansible_host') | unique | list | length) == (azure_app_hosts | length)
+    fail_msg: Generated Terraform inventory reuses an app private address.
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Select generated app01 hosts for tunnel accounts
+  ansible.builtin.set_fact:
+    azure_app01_hosts: "{{ azure_app_hosts | selectattr('app_role', 'equalto', 'app01') | sort(attribute='tenant_slug') | list }}"
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Initialize tunnel accounts derived from generated inventory
+  ansible.builtin.set_fact:
+    jump_tunnel_users: []
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Derive tenant tunnel accounts from generated app01 hostvars
+  ansible.builtin.set_fact:
+    jump_tunnel_users: >-
+      {{
+        jump_tunnel_users
+        + [{
+          'name': item.tenant_slug,
+          'public_key': item.developer_ssh_public_key,
+          'app_private_ips': item.tenant_app_private_ips
+        }]
+      }}
+  loop: "{{ azure_app01_hosts }}"
+  loop_control:
+    label: generated app01 topology
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Require complete unique derived tunnel accounts
+  ansible.builtin.assert:
+    that:
+      - (jump_tunnel_users | length) == (azure_app01_hosts | length)
+      - (jump_tunnel_users | map(attribute='name') | unique | list | length) == (jump_tunnel_users | length)
+    fail_msg: >-
+      Generated app01 hostvars do not produce a complete unique tunnel-account
+      set. Regenerate Terraform inventory instead of supplying manual users.
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Require complete derived tunnel account fields
+  ansible.builtin.assert:
+    that:
+      - item.name is match('^[a-z0-9]+(?:-[a-z0-9]+)*$')
+      - item.public_key is match('^(ssh-|ecdsa-sha2-|sk-ssh-)')
+      - item.app_private_ips | length == 2
+      - item.app_private_ips | unique | list | length == 2
+    fail_msg: Generated tunnel account data is incomplete.
+  loop: "{{ jump_tunnel_users }}"
+  loop_control:
+    label: derived tunnel account
+  no_log: true
+  tags: [generated_inventory]
+
+- name: Enable IPv4 forwarding for Jump NVA
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: '1'
+    state: present
+    reload: true
+
+- name: Require generated Jump topology
+  ansible.builtin.assert:
+    that:
+      - jump_tunnel_users | length > 0
+      - app_gateway_private_ip is defined
+      - app_gateway_port | int == 8080
+    fail_msg: Jump requires Terraform-generated tunnel accounts and the private App Gateway endpoint.
+  tags: [generated_inventory]
+
+- name: Install and enable nftables
+  ansible.builtin.dnf:
+    name: nftables
+    state: present
+
+- name: Enable nftables service
+  ansible.builtin.systemd:
+    name: nftables.service
+    enabled: true
+    state: started
+
+- name: Enable EPEL for Fail2ban on Rocky Linux
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+
+- name: Install Fail2ban
+  ansible.builtin.dnf:
+    name: fail2ban
+    state: present
+
+- name: Configure tolerant incremental SSH bans on the public Jump host
+  ansible.builtin.copy:
+    dest: /etc/fail2ban/jail.d/sshd.local
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      backend = systemd
+      mode = normal
+      port = ssh
+      banaction = nftables-multiport
+      maxretry = 20
+      findtime = 5m
+      bantime = 10m
+      bantime.increment = true
+      bantime.factor = 2
+      bantime.maxtime = 1h
+  notify: Restart fail2ban
+
+- name: Validate Fail2ban configuration
+  ansible.builtin.command:
+    cmd: fail2ban-client -t
+  changed_when: false
+
+- name: Install restrictive Jump nftables policy
+  ansible.builtin.copy:
+    dest: /etc/nftables/azure.nft
+    mode: '0600'
+    content: |
+      table inet filter {
+        chain input {
+          type filter hook input priority 0; policy drop;
+          iifname "lo" accept
+          ct state established,related accept
+          ip protocol icmp accept
+          ip6 nexthdr ipv6-icmp accept
+          ip saddr {{ allowed_ssh_cidr }} tcp dport 22 accept
+          ip saddr 10.10.1.10 tcp dport 22 accept
+        }
+        chain forward {
+          type filter hook forward priority 0; policy drop;
+          ct state established,related accept
+          ip saddr {{ jump_spoke_cidr }} ip daddr {{ jump_spoke_cidr }} drop
+          ip saddr {{ jump_spoke_cidr }} oifname "{{ jump_public_interface }}" accept
+        }
+      }
+      table ip nat {
+        chain postrouting {
+          type nat hook postrouting priority 100;
+          ip saddr {{ jump_spoke_cidr }} oifname "{{ jump_public_interface }}" masquerade
+        }
+      }
+  notify:
+    - Reload nftables
+    - Restart fail2ban
+
+- name: Validate nftables policy before activation
+  ansible.builtin.command:
+    cmd: nft -c -f /etc/nftables/azure.nft
+  changed_when: false
+
+- name: Include Azure nftables policy in the active Rocky ruleset
+  ansible.builtin.copy:
+    dest: /etc/sysconfig/nftables.conf
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      include "/etc/nftables/azure.nft"
+  notify:
+    - Reload nftables
+    - Restart fail2ban
+
+- name: Create unprivileged tenant tunnel accounts
+  ansible.builtin.user:
+    name: '{{ item.name }}'
+    shell: /sbin/nologin
+    create_home: true
+    groups: ''
+    append: false
+    password_lock: true
+  loop: '{{ jump_tunnel_users }}'
+  loop_control:
+    label: '{{ item.name }}'
+
+- name: Install tenant-scoped developer tunnel public keys
+  ansible.posix.authorized_key:
+    user: '{{ item.name }}'
+    key: '{{ item.public_key }}'
+    state: present
+    key_options: 'no-agent-forwarding,no-pty,no-user-rc,no-X11-forwarding'
+  loop: '{{ jump_tunnel_users }}'
+  loop_control:
+    label: '{{ item.name }}'
+
+- name: Install forced-command tunnel guard
+  ansible.builtin.copy:
+    dest: /usr/local/libexec/azure-tunnel
+    owner: root
+    group: root
+    mode: '0755'
+    content: |
+      #!/bin/sh
+      if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+        exit 126
+      fi
+      exec /usr/bin/sleep 2147483647
+
+- name: Render per-tenant SSH Match restrictions
+  ansible.builtin.template:
+    src: sshd_config_azure_jump.j2
+    dest: /etc/ssh/sshd_config.d/98-azure-jump.conf
+    owner: root
+    group: root
+    mode: '0600'
+  notify: Restart sshd
+
+- name: Validate SSH daemon configuration before restart
+  ansible.builtin.command:
+    argv: [/usr/sbin/sshd, -t]
+  changed_when: false
+
+- name: Activate pending SSH hardening handler
+  ansible.builtin.meta: flush_handlers
+
+- name: Keep Jump firewall and ban services enabled and running
+  ansible.builtin.systemd:
+    name: '{{ item }}'
+    enabled: true
+    state: started
+  loop: [nftables.service, fail2ban.service]
+
+- name: Verify active nftables policy contains default-deny input and forward chains
+  ansible.builtin.command:
+    argv: [nft, list, ruleset]
+  register: jump_nft_ruleset
+  changed_when: false
+  failed_when: >-
+    'chain input' not in jump_nft_ruleset.stdout or
+    'policy drop' not in jump_nft_ruleset.stdout or
+    'chain forward' not in jump_nft_ruleset.stdout

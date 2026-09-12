@@ -1,0 +1,44 @@
+flowchart TB
+    Legend["resolved VM SKU = one subscription-resolved size\napplied identically to Jump, Lead, app01, app02\n(Standard_B2s preferred; Standard_B2als_v2 then\nStandard_D2als_v6 quota-aware fallbacks --\nsee scripts/Resolve-AzureDeploymentProfile.ps1)"]
+    Internet["Approved admin workstation"] -->|SSH from allowed CIDR| PIP["Only Public IP\nJump VM"]
+
+    subgraph Shared["rg-ts-shared-testing-<location-short> · shared hub 10.10.0.0/16"]
+        PIP --> Jump["Jump · Rocky Linux 10\nresolved VM SKU · 10.10.0.10"]
+        Lead["DevOps lead · Rocky Linux 10\nresolved VM SKU · 10.10.1.10"]
+        AGW["Private-only Application Gateway\nStandard_v2 · 10.10.2.10:8080"]
+        DNS["Private DNS zones\n*.moodle.test and PaaS zones"]
+        MYS["MySQL 8.4\nGP_Standard_D2ds_v4 · GeneralPurpose\nZoneRedundant · zones 1/2\nPrivate Access · 10.10.3.0/24\nshared DBs/users/grants: moodle_<slug>"]
+        Jump -. SNAT .-> Internet
+    end
+
+    subgraph DevA["rg-ts-<developer-a>-testing-<location-short> · spoke slot A"]
+        A1["app01 · Rocky Linux 10\nresolved VM SKU · Zone 1\nOS + 32GiB data disk"]
+        A2["app02 · Rocky Linux 10\nresolved VM SKU · Zone 2\nOS + 32GiB data disk"]
+        AMS["Reserved legacy tenant MySQL subnet\nunused · migration compatibility"]
+        AF["Azure Files Premium FileStorage LRS\nNFSv4.1 · AUTH_SYS · private endpoint\nnative nfs-utils · no SMB/AZNFS helper\nholds moodledata (live app data)"]
+        AB["Blob LRS\npublic access disabled\nholds automated course backups"]
+        PE["Two Private Endpoint objects\nFiles · Blob"]
+    end
+
+    subgraph DevN["rg-ts-<developer-n>-testing-<location-short> · isolated spoke slot N"]
+        N1["app01 · Rocky Linux 10\nresolved VM SKU · Zone 1"]
+        N2["app02 · Rocky Linux 10\nresolved VM SKU · Zone 2"]
+        NP["Tenant storage and private endpoints\nFiles/Blob; shared MySQL database access"]
+    end
+
+    AGW -->|hostname round-robins across both instances\nshared session/cache via NFS dataroot| A1
+    AGW -->|hostname round-robins across both instances\nshared session/cache via NFS dataroot| A2
+    Jump -->|admin/SNAT only| A1
+    Jump -->|admin/SNAT only| A2
+    A1 --> MYS
+    A2 --> MYS
+    N1 --> MYS
+    N2 --> MYS
+    A1 --> PE
+    A2 --> PE
+    PE --> AF
+    PE --> AB
+    DNS --- PE
+    DNS --- MYS
+    Shared ---|hub-spoke peering only| DevA
+    Shared ---|hub-spoke peering only| DevN

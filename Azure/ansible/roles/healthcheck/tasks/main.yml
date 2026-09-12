@@ -1,0 +1,35 @@
+---
+- name: Check exact active data disk, Files and Blob mountpoints
+  ansible.builtin.command:
+    argv: [findmnt, -n, --mountpoint, '{{ item }}']
+  changed_when: false
+  loop: ['{{ moodle_local_mount }}', '{{ azure_files_mount }}', '{{ azure_blob_mount }}']
+
+- name: Check Moodle local health endpoint
+  ansible.builtin.uri:
+    url: 'http://127.0.0.1/healthz'
+    status_code: 200
+    return_content: false
+  changed_when: false
+
+- name: Check dependency-aware Moodle readiness endpoint
+  ansible.builtin.uri:
+    url: 'http://127.0.0.1/readyz'
+    status_code: 200
+    return_content: false
+  changed_when: false
+
+- name: Check non-secret backend identity endpoint
+  ansible.builtin.uri:
+    url: 'http://127.0.0.1/whoami'
+    status_code: 200
+    return_content: true
+  register: moodle_whoami
+  changed_when: false
+
+- name: Require hostname and deployment ID from backend identity endpoint
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname in moodle_whoami.content
+      - azure_deployment_id in moodle_whoami.content
+    fail_msg: /whoami did not identify the expected backend and non-secret deployment ID.

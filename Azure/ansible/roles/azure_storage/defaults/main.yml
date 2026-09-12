@@ -1,0 +1,9 @@
+---
+azure_files_mount: /mnt/moodle-shared
+azure_blob_mount: /mnt/moodle-objects
+azure_mount_ready_marker: .techsprint-mount-ready
+azure_files_nfs_options: vers=4,minorversion=1,sec=sys,noresvport,nconnect=4,_netdev,actimeo=30
+blobfuse2_repo_baseurl: 'https://packages.microsoft.com/rhel/10/prod/'
+blobfuse2_repo_gpg_key_url: 'https://packages.microsoft.com/keys/microsoft-2025.asc'
+blobfuse2_repo_gpg_key_sha256: 'd45224d594d969f084232deaaf97c58ca502a9d964c362d7aaef5a76e16b3dd1'
+blobfuse2_repo_gpg_key_fingerprint: 'AA86F75E427A19DD33346403EE4D7792F748182B'

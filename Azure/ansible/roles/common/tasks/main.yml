@@ -1,0 +1,24 @@
+---
+- name: Install common Rocky Linux packages
+  ansible.builtin.dnf:
+    name: '{{ azure_required_packages }}'
+    state: present
+
+- name: Keep SELinux enforcing
+  ansible.posix.selinux:
+    policy: targeted
+    state: enforcing
+
+- name: Disable SSH password authentication
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/99-azure-hardening.conf
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PermitRootLogin no
+      X11Forwarding no
+      AllowAgentForwarding no
+  notify: Restart sshd

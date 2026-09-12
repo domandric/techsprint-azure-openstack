@@ -1,0 +1,57 @@
+#cloud-config
+ssh_pwauth: false
+disable_root: true
+users:
+  - name: ${developer_slug}
+    groups: [wheel]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - ${jsonencode(public_key)}
+write_files:
+  - path: /var/lib/techsprint/lead/id_rsa
+    permissions: '0600'
+    content: |
+      ${indent(6, private_key)}
+  - path: /var/lib/techsprint/lead/id_rsa.pub
+    permissions: '0644'
+    content: |
+      ${public_key}
+  - path: /var/lib/techsprint/lead/lead-openrc
+    permissions: '0600'
+    content: |
+      export OS_AUTH_URL='${auth_url}'
+      export OS_IDENTITY_API_VERSION=3
+      export OS_USERNAME='${username}'
+      export OS_PASSWORD='${password}'
+      export OS_USER_DOMAIN_ID='${domain_id}'
+      export OS_PROJECT_DOMAIN_ID='${domain_id}'
+      export OS_REGION_NAME='${region}'
+  - path: /var/lib/techsprint/lead/project-ids
+    permissions: '0600'
+    content: |
+      ${indent(6, project_ids)}
+runcmd:
+  - |
+      set -euo pipefail
+      required_packages=(python3 curl policycoreutils)
+      packages_installed=false
+      for attempt in $(seq 1 60); do
+        if timeout --signal=TERM --kill-after=10s 120s dnf install -y --setopt=timeout=15 --setopt=retries=2 "$${required_packages[@]}"; then
+          packages_installed=true
+          break
+        fi
+        sleep 5
+      done
+      [[ "$${packages_installed}" == true ]] || { printf 'Required lead packages did not install within the retry budget\n' >&2; exit 1; }
+      if grep -q '^SELINUX=' /etc/selinux/config; then sed -i 's/^SELINUX=.*/SELINUX=enforcing/' /etc/selinux/config; else printf '\nSELINUX=enforcing\n' >> /etc/selinux/config; fi
+      setenforce 1
+      [[ "$(getenforce)" == Enforcing ]] || { printf 'SELinux is not enforcing\n' >&2; exit 1; }
+      install -d -o ${developer_slug} -g ${developer_slug} -m 0700 /home/${developer_slug}/.ssh
+      install -o ${developer_slug} -g ${developer_slug} -m 0600 /var/lib/techsprint/lead/id_rsa /home/${developer_slug}/.ssh/id_rsa
+      install -o ${developer_slug} -g ${developer_slug} -m 0644 /var/lib/techsprint/lead/id_rsa.pub /home/${developer_slug}/.ssh/id_rsa.pub
+      install -o ${developer_slug} -g ${developer_slug} -m 0600 /var/lib/techsprint/lead/lead-openrc /home/${developer_slug}/lead-openrc
+      install -o ${developer_slug} -g ${developer_slug} -m 0600 /var/lib/techsprint/lead/project-ids /home/${developer_slug}/project-ids
+      chown ${developer_slug}:${developer_slug} /home/${developer_slug}
+      rm -f /var/lib/techsprint/lead/id_rsa /var/lib/techsprint/lead/id_rsa.pub /var/lib/techsprint/lead/lead-openrc /var/lib/techsprint/lead/project-ids
+final_message: TECHSPRINT_LEAD_READY
